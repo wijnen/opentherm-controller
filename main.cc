@@ -54,12 +54,14 @@ struct Zone { // {{{
 // }}}
 
 // Globals. {{{
+// All non-const variables are marked volatile even if they don't need to be.
+// This is because there is only a small cost to performance, but it saves very
+// hard to debug issues.
 static uint8_t const pump_pin[] = pump_pins;
 static uint8_t const valve_pin[] = valve_pins;
-static uint32_t pid_period = default_pid_period;
+static volatile uint32_t pid_period = default_pid_period;
 // Globals that are computed from configuration.
 static unsigned int const num_valves = sizeof(valve_pin) / sizeof(*valve_pin);
-static unsigned int const num_zones = num_valves;	// At most one zone per valve.
 static unsigned int const num_pumps = sizeof(pump_pin) / sizeof(*pump_pin);
 #ifndef USE_OTGW
 static uint8_t const opentherm_in_pin = Pcint::get_pin(opentherm_in_int);	// Input pin as gpio.
@@ -102,19 +104,19 @@ static uint8_t read_digit(uint8_t src);
 // - GPIO array connects to relays for heater valves; one for each heater.
 // - On the opentherm gateway, the interface firmware is used (http://otgw.tclcode.com/interface.html).
 // - Watchdog is used to reset the system if it hangs. On reset, all zones are set to defrost (5 degrees).
-// - Counter 0 is used to trigger periodic opentherm command sending and to run PID state updates and handle PID PWM.
-// - Counter 1 is used to capture and send opentherm messages (if OTGW is not used).
+// - Counter 0 is used to capture and send opentherm messages (if OTGW is not used).
+// - Counter 1 is used to trigger periodic opentherm command sending and to run PID state updates and handle PID PWM.
 
 // Design (firmware):
 // - Every zone has a temperature setpoint.
 // - Current temperature in each zone is reported periodically.
-// - Every zone has PID settings.
-// - Once per period (which is usually 5 minutes), every zone's PID control is updated. The result is an output control for the requested temperature to be sent to this zone.
-// - The output control can be overruled by the controller. This can also be used for zones without a thermostat.
-// - For every zone where the output control is lower than the current zone temperature, the output control is disabled and the corresponding valves are closed.
+// - Every valve has PID settings.
+// - Once per period (which is usually 5 minutes), every valve's PID control is updated. The result is an output control for the requested temperature to be sent to this valve.
+// - The output control can be overruled by the controller. This can also be used for zones without a thermostat. (TODO: This is not currently implemented.)
+// - For every valve where the output control is lower than the current zone temperature, the output control is disabled and the valve is closed.
 // - If all output controls are disabled, the boiler is switched off; otherwise it is switched on as follows:
-// - The control setpoint of the boiler is set to the highest value of any of the zones.
-// - For every zone the fraction of that temperature is computed.
+// - The control setpoint of the boiler is set to the highest value of any of the valves.
+// - For every valve the fraction of that temperature is computed.
 // - Valves are PWM'd using their zone's fraction. The PWM is fixed frequency with variable duty cycle, one on-pulse and one off-pulse during a single period (which is the same as the PID period, so usually 5 minutes).
 // - While any of the floor heaters are on, the corresponding external pump is enabled.
 
@@ -127,10 +129,9 @@ static uint8_t read_digit(uint8_t src);
 // Configuration (set and retrieve current values through serial interface):
 // - Current temperature for every zone.
 // - Temperature setpoint for every zone.
-// - P, I, D values for every zone.
-// - PID I-buffer for every zone.
+// - P, I, D values for every valve.
+// - PID I-buffer for every valve.
 // - Zone assignment for every valve.
-// - Multiplier for every valve.
 // - Which pump it links to (-1 for none), for every valve.
 // - Whether the valve is normally open or normally closed, for every valve.
 // - PID and PWM period (default 5 minutes).
@@ -159,12 +160,16 @@ static uint8_t read_digit(uint8_t src);
 // UserDefined
 // MsgID 18: Water pressure in CH circuit 	(read)
 
+// The split between read at boot, read when requested and monitor is a
+// suggestion for a host program; the firmware does not read any of these
+// unless requested.
+
 // Useful readable info (read at boot):
 // 0, 3: status flags, slave configuration
 // 15: max capacity/min modulation level
 // 48: DHW setpoint bounds for adjustment
 // 49: CH setpoint bounds for adjustment
-// (50: OTC heat curve ratio bounds for adjustment)
+// (50: OTC heat curve ratio bounds for adjustment)	OTC is "outside temperature correction", for adjusting target water temperature based on outside temperature.
 // 56: DHW setpoint
 // 57: max CH water setpoint
 // 58: OTC heat curve ratio
@@ -216,6 +221,7 @@ static bool compute_parity(uint8_t src) { // {{{
 	return src & 1;
 } // }}}
 
+// Parse a single hexadecimal digit.
 static uint8_t read_digit(uint8_t src) { // {{{
 	if (src >= '0' && src <= '9')
 		return src - '0' + 0x0;
@@ -238,18 +244,16 @@ static void setup() { // {{{
 		Gpio::write(valve_pin[i], false);
 
 	// Start system clock.
-	Counter::set_ocr0a(F_CPU / 1024 / Hz);
-	Counter::enable0(Counter::s0_div1024, Counter::m0_ctc);
+	Counter::set_ocr1a(F_CPU / 1024 / Hz);
+	Counter::enable1(Counter::s1_div1024, Counter::m1_ctc_ocra);
 
 #ifndef USE_OTGW
-	// Prepare opentherm clock.
-	Counter::enable1(Counter::s1_div1, Counter::m1_ctc_ocra);
 	Pcint::enable_group(opentherm_in_group);
 #endif
 } // }}}
 
 // This clock triggers Hz times per second.
-ISR(TIMER0_COMPA_vect) {
+ISR(TIMER1_COMPA_vect) {
 	// Check if valves need to be closed for pwm. {{{
 	float now = ++pid_timer / pid_period;
 	for (unsigned vi = 0; vi < num_valves; ++vi) {
@@ -285,9 +289,8 @@ ISR(TIMER0_COMPA_vect) {
 
 	// Compute new pid state.
 	float max_out = -INFINITY;
-	int old_pump_active[num_pumps];
 	for (unsigned i = 0; i < num_pumps; ++i)
-		old_pump_active[i] = pump_active[i];
+		pump_active[i] = 0;
 	for (unsigned vi = 0; vi < num_valves; ++vi) {
 		// Ignore zone with no valves.
 		volatile Valve *v = &valve[vi];
@@ -300,8 +303,6 @@ ISR(TIMER0_COMPA_vect) {
 		float part_P = v->P * -error;
 		float part_D = v->P * v->D * (z->temperature - z->last_temperature) / dt;
 		v->out = part_P + v->I_buffer + part_D;
-		if (v->active && v->pump >= 0)
-			--pump_active[v->pump];
 		v->active = v->out > z->temperature;
 		if (v->active && v->pump >= 0)
 			pump_active[v->pump]++;
@@ -315,18 +316,15 @@ ISR(TIMER0_COMPA_vect) {
 			v->I_buffer = z->setpoint + 50;
 	}
 	// Set new pump state.
-	for (unsigned i = 0; i < num_pumps; ++i) {
-		if (old_pump_active[i] == 0 && pump_active[i] > 0)
-			Gpio::write(pump_pin[i], true);
-		else if (old_pump_active[i] > 0 && pump_active[i] == 0)
-			Gpio::write(pump_pin[i], false);
-	}
+	for (unsigned i = 0; i < num_pumps; ++i)
+		Gpio::write(pump_pin[i], pump_active[i] > 0);
 
 	// Set last temperature.
 	for (unsigned z = 0; z < num_zones; ++z)
 		zone[z].last_temperature = zone[z].temperature;
 
 	if (!isinf(max_out)) {
+		// At least one valve is requesting a temperature.
 		for (unsigned vi = 0; vi < num_valves; ++vi) {
 			volatile Valve *v = &valve[vi];
 			if (!v->active)
@@ -334,13 +332,10 @@ ISR(TIMER0_COMPA_vect) {
 			float sp = zone[v->zone].setpoint;
 			v->pwm = (max_out - sp) / (v->out - sp);
 			Gpio::write(valve_pin[vi], !v->normally_open);
-			if (v->pump >= 0) {
-				if (pump_active[v->pump]++ == 0)
-					Gpio::write(pump_pin[v->pump], true);
-			}
 		}
 	}
 	if (current_out != max_out) {
+		// Temperature changed; immediately update.
 		current_out = max_out;
 		opentherm_transaction(Write, 1, current_out, true);
 	}
@@ -432,55 +427,58 @@ static void send_opentherm(uint8_t type, uint8_t id, uint16_t value) { // {{{
 		type |= 0x8;
 	type <<= 4;
 	uint32_t raw = (uint32_t(type) << 24) | (uint32_t(id) << 16) | value;
-	Counter::set_ocr1a(F_CPU / 2000);	// 2 overflows per ms for sending command.
-	cli(); // Disable interrupts for good timing.
+	// With a 16MHz clock and a divider of 64, the clock runs at 250kHz, so 125 ticks per half millisecond (which is the OpenTherm pulse width).
+	Counter::enable0(Counter::s0_div64, Counter::m0_ctc);
+	Counter::set_ocr0a(F_CPU / 64 / 2000);	// 2 overflows per ms for sending command.
 	Gpio::write(opentherm_out_pin, false);
-	Counter::clear_ints1();
+	Counter::clear_ints0();
 	// Start bit. {{{
-	while (!Counter::has_ovf1()) {}
+	while (!Counter::has_ovf0()) {}
 	Gpio::write(opentherm_out_pin, true);
-	Counter::clear_ints1();
-	while (!Counter::has_ovf1()) {}
+	Counter::clear_ints0();
+	while (!Counter::has_ovf0()) {}
 	Gpio::write(opentherm_out_pin, false);
-	Counter::clear_ints1();
+	Counter::clear_ints0();
 	// }}}
 	// Data bits. {{{
 	for (int8_t bit = 31; bit >= 0; --bit) {
 		bool b = (raw >> bit) & 1;
-		while (!Counter::has_ovf1()) {}
+		while (!Counter::has_ovf0()) {}
 		Gpio::write(opentherm_out_pin, b);
-		Counter::clear_ints1();
-		while (!Counter::has_ovf1()) {}
+		Counter::clear_ints0();
+		while (!Counter::has_ovf0()) {}
 		Gpio::write(opentherm_out_pin, !b);
-		Counter::clear_ints1();
+		Counter::clear_ints0();
 	}
 	// }}}
 	// Stop bit. {{{
-	while (!Counter::has_ovf1()) {}
+	while (!Counter::has_ovf0()) {}
 	Gpio::write(opentherm_out_pin, true);
-	Counter::clear_ints1();
-	while (!Counter::has_ovf1()) {}
+	Counter::clear_ints0();
+	while (!Counter::has_ovf0()) {}
 	Gpio::write(opentherm_out_pin, false);
 	// }}}
-	sei();
 
 	// Prepare counter for receiving reply.
-	Counter::set_ocr1a(F_CPU / 20000);	// Overflow after 50 μs; 20 overflows per ms. (Useful unit because of transition window is 900-1150 μs, so 18-23 overflows.)
+	Counter::enable0(Counter::s0_div8, Counter::m0_ctc);
+	Counter::set_ocr0a(F_CPU / 8 / 20000);	// Overflow after 50 μs; 20 overflows per ms. (Useful unit because of transition window is 900-1150 μs, so 18-23 overflows.)
 	recv_ovf = -1;	// Prepare overflow counter as "not counting yet".
-	Counter::clear_ints1();
-	Counter::enable_ovf1();
+	Counter::clear_ints0();
+	Counter::enable_ovf0();
 	Pcint::clear_group(opentherm_in_group);
 	Pcint::enable(opentherm_in_int);
 } // }}}
 
 // Receive opentherm data.
-ISR(TIMER1_OVF_vect) { // {{{
-	if (recv_ovf < 0)
+ISR(TIMER0_OVF_vect) { // {{{
+	if (recv_ovf < 0) {
+		// We are not receiving a packet, so ignore overflows.
 		return;
+	}
 	if (++recv_ovf > 24) {
 		dbg("Data error: no valid reply received");
 		// Disable further reception.
-		Counter::disable_ovf1();
+		Counter::disable_ovf0();
 		Pcint::disable(opentherm_in_int);
 	}
 } // }}}
@@ -494,7 +492,7 @@ ISR(PCINT_VECT) { // {{{
 		// We are waiting for the start bit. Start the timer (if this is a falling edge).
 		if (!b) {
 			// Reset counter for better timing.
-			Counter::write1(0);
+			Counter::write0(0);
 			// Start counting overflows.
 			recv_ovf = 0;
 			recv_flip = false;
@@ -506,7 +504,7 @@ ISR(PCINT_VECT) { // {{{
 	// Ignore (at most one) bit flip that is not in the window.
 	if (++recv_ovf < 17) {
 		if (recv_flip) {
-			Counter::disable_ovf1();
+			Counter::disable_ovf0();
 			Pcint::disable(opentherm_in_int);
 			dbg("noise found during opentherm reception");
 		}
@@ -515,14 +513,14 @@ ISR(PCINT_VECT) { // {{{
 	}
 	// Edge found.
 	// Reset counter for better timing.
-	Counter::write1(0);
+	Counter::write0(0);
 	// Start counting overflows.
 	recv_ovf = 0;
 	recv_flip = false;
 	// Check if this is the stop bit.
 	if (++recv_bit > 31) {
 		// Stop bit found; disable further events.
-		Counter::disable_ovf1();
+		Counter::disable_ovf0();
 		Pcint::disable(opentherm_in_int);
 		if (b) {
 			dbg("incorrect stop bit received");
@@ -567,12 +565,12 @@ static void opentherm_transaction(uint8_t type, uint8_t id, uint16_t value, bool
 	if (opentherm_id != id)
 		dbg("invalid id # returned, should be #", opentherm_id, id);
 	// Wait at least 100 ms.
-	// Timer0 runs at 125 Hz.
+	// Timer1 runs at 125 Hz.
 	// 12.5 overflows is 0.1 s.
 	// The first overflow may happen in 0 cycles, so wait for 14 overflows to be sure.
 	for (uint8_t i = 0; i < 14; ++i) {
-		Counter::clear_ints0();
-		while (!Counter::has_ovf0()) {}
+		Counter::clear_ints1();
+		while (!Counter::has_ovf1()) {}
 	}
 	// Release lock.
 	locked = false;

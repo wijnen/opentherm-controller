@@ -42,7 +42,7 @@
 
 // Maximum number of zones.
 // num_valves is defined later as the number of elements in valve_pins.
-#define NUM_ZONES num_valves
+#define num_zones num_valves
 
 // Frequency of clock which handles PID updates.
 // Use 125 Hz because with a 16MHz clock,

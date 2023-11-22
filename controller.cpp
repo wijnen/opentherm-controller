@@ -1,6 +1,6 @@
 // This file contains the high level parts of the controller.
 
-// Send an opentherm command (to keep the line active, and to monitor the system).
+// Send an opentherm command (to keep the line active).
 static void send_next_opentherm() { // {{{
 	opentherm_transaction(Write, 1, current_out, false);	// Repeatedly write setpoint, to avoid timeouts.
 	dbg("status: #, #, *", opentherm_type, opentherm_id, opentherm_value);
@@ -53,31 +53,58 @@ static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
 		value = read_u16(&buffer[5]);
 		switch (buffer[1]) {
 		case 'C':	// Current temperature
-			zone[id].temperature = value / 256.;
+			if (id >= num_zones)
+				dbg("invalid zone");
+			else
+				zone[id].temperature = value / 256.;
 			break;
 		case 'T':	// Temperature setpoint
-			zone[id].setpoint = value / 256.;
+			if (id >= num_zones)
+				dbg("invalid zone");
+			else
+				zone[id].setpoint = value / 256.;
 			break;
 		case 'P':	// Proportional part of PID
-			valve[id].P = value / 256.;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].P = value / 256.;
 			break;
 		case 'I':	// Integral part of PID
-			valve[id].I = value / 256.;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].I = value / 256.;
 			break;
 		case 'D':	// Derivative part of PID
-			valve[id].D = value / 256.;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].D = value / 256.;
 			break;
 		case 'B':	// I-buffer
-			valve[id].I_buffer = value / 256.;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].I_buffer = value / 256.;
 			break;
 		case 'Z':	// Zone
-			valve[id].zone = value;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].zone = value;
 			break;
 		case 'F':	// Floor pump
-			valve[id].pump = value;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].pump = value;
 			break;
 		case 'O':	// Normally open
-			valve[id].normally_open = value;
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				valve[id].normally_open = value;
 			break;
 		case 't':	// PID period
 			pid_period = value;	// id is ignored.
@@ -97,40 +124,73 @@ static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
 		// Report requested data to command port.
 		switch (buffer[1]) {
 		case 'C':	// Current temperature
-			Usart::tx0_print("GC#:*", id, uint16_t(zone[id].temperature * 256));
+			if (id >= num_zones)
+				dbg("invalid zone");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(zone[id].temperature * 256));
 			break;
 		case 'T':	// Temperature setpoint
-			Usart::tx0_print("GC#:*", id, uint16_t(zone[id].setpoint * 256));
+			if (id >= num_zones)
+				dbg("invalid zone");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(zone[id].setpoint * 256));
 			break;
 		case 'P':	// Proportional part of PID
-			Usart::tx0_print("GC#:*", id, uint16_t(valve[id].P * 256));
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(valve[id].P * 256));
 			break;
 		case 'I':	// Integral part of PID
-			Usart::tx0_print("GC#:*", id, uint16_t(valve[id].I * 256));
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(valve[id].I * 256));
 			break;
 		case 'D':	// Derivative part of PID
-			Usart::tx0_print("GC#:*", id, uint16_t(valve[id].D * 256));
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(valve[id].D * 256));
 			break;
 		case 'B':	// I-buffer
-			Usart::tx0_print("GC#:*", id, uint16_t(valve[id].I_buffer * 256));
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, uint16_t(valve[id].I_buffer * 256));
 			break;
 		case 'Z':	// Zone
-			Usart::tx0_print("GC#:*", id, valve[id].zone);
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, valve[id].zone);
 			break;
 		case 'F':	// Floor pump
-			Usart::tx0_print("GC#:*", id, valve[id].pump);
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, valve[id].pump);
 			break;
 		case 'O':	// Normally open
-			Usart::tx0_print("GC#:*", id, valve[id].normally_open);
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, valve[id].normally_open);
 			break;
 		case 't':	// PID period
 			Usart::tx0_print("GC#:*", id, pid_period);
 			break;
 		case 'S':	// Valve state
-			Usart::tx0_print("GC#:*", id, valve[id].active);
+			if (id >= num_valves)
+				dbg("invalid valve");
+			else
+				Usart::tx0_print("GC#:*", id, valve[id].active);
 			break;
 		case 'E':	// External pump state
-			Usart::tx0_print("GC#:*", id, pump_active[id]);
+			if (id >= num_pumps)
+				dbg("invalid pump");
+			else
+				Usart::tx0_print("GC#:*", id, pump_active[id]);
 			break;
 		default:
 			dbg("invalid G command");
