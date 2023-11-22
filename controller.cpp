@@ -7,15 +7,15 @@ static void send_next_opentherm() { // {{{
 } // }}}
 
 // Helper functions for handle_command.
-static uint8_t read_u8(uint8_t const *buffer) { // {{{
+static uint8_t read_u8(volatile uint8_t *buffer) { // {{{
 	return (read_digit(buffer[0]) << 4) | read_digit(buffer[1]);
 } // }}}
-static uint16_t read_u16(uint8_t const *buffer) { // {{{
+static uint16_t read_u16(volatile uint8_t *buffer) { // {{{
 	return (read_digit(buffer[0]) << 12) | (read_digit(buffer[1]) << 8) | (read_digit(buffer[2]) << 4) | read_digit(buffer[3]);
 } // }}}
 
 // Command received on serial port; handle it.
-static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
+static void handle_command() { // {{{
 	// Supported commands:
 	// SC<zone>=<value> / GC<zone>			Set/get current temperature for a zone.
 	// ST<zone>=<value> / GT<zone>			Set/get temperature setpoint for a zone.
@@ -39,19 +39,23 @@ static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
 	// code: 1 character
 	// id: 2 character hex
 	// value: 4 character hex
-	if (len == 0)
+	if (command_len == 0)
 		return;
 	uint8_t id;
 	uint16_t value;
-	switch (buffer[0]) {
+	uint8_t code;
+	switch (command_buffer[0]) {
 	case 'S':
-		if (len != 9) {
+		if (command_len != 9) {
 			dbg("S command too short");
 			return;
 		}
-		id = read_u8(&buffer[2]);
-		value = read_u16(&buffer[5]);
-		switch (buffer[1]) {
+		id = read_u8(&command_buffer[2]);
+		value = read_u16(&command_buffer[5]);
+		code = command_buffer[1];
+		command_len = 0;	// Free buffer.
+		sei();
+		switch (code) {
 		case 'C':	// Current temperature
 			if (id >= num_zones)
 				dbg("invalid zone");
@@ -116,13 +120,16 @@ static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
 		dbg("value has been set");
 		break;
 	case 'G':
-		if (len != 4) {
+		if (command_len != 4) {
 			dbg("S command too short");
 			return;
 		}
-		id = read_u8(&buffer[2]);
+		id = read_u8(&command_buffer[2]);
+		code = command_buffer[1];
+		command_len = 0;	// Free buffer.
+		sei();
 		// Report requested data to command port.
-		switch (buffer[1]) {
+		switch (code) {
 		case 'C':	// Current temperature
 			if (id >= num_zones)
 				dbg("invalid zone");
@@ -199,28 +206,33 @@ static void handle_command(uint8_t *buffer, uint8_t len) { // {{{
 		dbg("get complete");
 		break;
 	case 'R':
-		if (len != 3) {
+		if (command_len != 3) {
 			dbg("S command too short");
 			return;
 		}
-		id = read_u8(&buffer[1]);
+		id = read_u8(&command_buffer[1]);
+		command_len = 0;	// Free buffer.
+		sei();
 		opentherm_transaction(Read, id, 0, true);
 		dbg("opentherm read transaction done: #, #, *", opentherm_type, opentherm_id, opentherm_value);
-		// Report to command port.
-		Usart::tx0_print("R#:#:*", opentherm_type, opentherm_id, opentherm_value);
+		// Reply is sent from opentherm_transaction.
 		break;
 	case 'W':
-		if (len != 8) {
+		if (command_len != 8) {
 			dbg("S command too short");
 			return;
 		}
-		id = read_u8(&buffer[1]);
-		value = read_u16(&buffer[4]);
+		id = read_u8(&command_buffer[1]);
+		value = read_u16(&command_buffer[4]);
+		command_len = 0;	// Free buffer.
+		sei();
 		opentherm_transaction(Write, id, value, true);
 		dbg("opentherm write transaction done: #, #, *", opentherm_type, opentherm_id, opentherm_value);
 		break;
 	default:
 		dbg("invalid command");
+		command_len = 0;	// Free buffer.
+		sei();
 		return;
 	}
 } // }}}

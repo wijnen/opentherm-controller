@@ -76,6 +76,9 @@ static volatile unsigned int pump_active[num_pumps];	// Number of valves that ar
 static volatile uint8_t clock_phase;	// Count up to Hz for seconds clock.
 static volatile uint32_t pid_timer;	// Count up to selected period for pid update (unit is clock ticks, so Hz per second).
 static volatile float current_out = -INFINITY;	// Current output temperature for boiler.
+static volatile uint8_t command_buffer[20];	// Maximum length command is "S.00=0000\n", which is 10.
+static volatile uint8_t command_len = 0;	// Length of currently queued command, or 0 if no command is queued.
+static volatile bool in_transaction = false;
 
 // Current received opentherm command.
 static volatile uint8_t opentherm_type;
@@ -347,10 +350,11 @@ static void usart_rx0(uint8_t data, uint8_t len) { // {{{
 	if (data != '\n')
 		return;
 	// Copy command into buffer and handle it.
-	uint8_t buffer[len];
-	Usart::rx0_move(buffer, len);
-	buffer[len - 1] = '\0';
-	handle_command(buffer, len);
+	command_len = len;
+	Usart::rx0_move(const_cast <uint8_t *>(command_buffer), len);	// cast away volatile.
+	command_buffer[len - 1] = '\0';
+	if (!in_transaction)
+		handle_command();
 } // }}}
 
 // Receive opentherm data.
@@ -542,12 +546,11 @@ ISR(PCINT_VECT) { // {{{
 
 // Send an opentherm command and wait for a reply.
 static void opentherm_transaction(uint8_t type, uint8_t id, uint16_t value, bool block) { // {{{
-	static volatile bool locked = false;
 	// Claim lock. {{{
 	while (true) {
 		cli();	// Avoid race conditions by diabling interrupts.
-		if (!locked) {
-			locked = true;
+		if (!in_transaction) {
+			in_transaction = true;
 			sei();
 			break;
 		}
@@ -556,7 +559,7 @@ static void opentherm_transaction(uint8_t type, uint8_t id, uint16_t value, bool
 		// lock to be released and then retry claiming it.
 		if (!block)
 			return;
-		while (locked) {}
+		while (in_transaction) {}
 	}
 	// }}}
 	opentherm_ready = false;
@@ -564,6 +567,10 @@ static void opentherm_transaction(uint8_t type, uint8_t id, uint16_t value, bool
 	while (!opentherm_ready) {}
 	if (opentherm_id != id)
 		dbg("invalid id # returned, should be #", opentherm_id, id);
+	if (type == Read) {
+		// Report to command port.
+		Usart::tx0_print("R#:#:*", opentherm_type, opentherm_id, opentherm_value);
+	}
 	// Wait at least 100 ms.
 	// Timer1 runs at 125 Hz.
 	// 12.5 overflows is 0.1 s.
@@ -573,7 +580,13 @@ static void opentherm_transaction(uint8_t type, uint8_t id, uint16_t value, bool
 		while (!Counter::has_ovf1()) {}
 	}
 	// Release lock.
-	locked = false;
+	cli();
+	in_transaction = false;
+	if (command_len > 0) {
+		// A command was waiting to be sent; send it now.
+		// This will enable interrupts after the buffer has been freed.
+		handle_command();
+	}
 } // }}}
 
 // vim: set foldmethod=marker :
